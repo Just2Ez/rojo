@@ -169,15 +169,38 @@ impl JobThreadContext {
         // of the tree. Calculate and apply all of these changes.
         let applied_patches = match event {
             VfsEvent::Create(path) | VfsEvent::Write(path) => {
-                self.apply_patches(self.vfs.canonicalize(&path).unwrap())
+                // Editors that save atomically create a temp file and rename it
+                // away before this event is handled, so the path may be gone.
+                match self.vfs.canonicalize(&path) {
+                    Ok(normalized) => self.apply_patches(normalized),
+                    Err(err) => {
+                        log::warn!("Skipping vanished path {}: {}", path.display(), err);
+                        Vec::new()
+                    }
+                }
             }
             VfsEvent::Remove(path) => {
                 // MemoFS does not track parent removals yet, so we can canonicalize
                 // the parent path safely and then append the removed path's file name.
-                let parent = path.parent().unwrap();
-                let file_name = path.file_name().unwrap();
-                let parent_normalized = self.vfs.canonicalize(parent).unwrap();
-                self.apply_patches(parent_normalized.join(file_name))
+                match (path.parent(), path.file_name()) {
+                    (Some(parent), Some(file_name)) => match self.vfs.canonicalize(parent) {
+                        Ok(parent_normalized) => {
+                            self.apply_patches(parent_normalized.join(file_name))
+                        }
+                        Err(err) => {
+                            log::warn!(
+                                "Skipping removal under vanished parent {}: {}",
+                                path.display(),
+                                err
+                            );
+                            Vec::new()
+                        }
+                    },
+                    _ => {
+                        log::warn!("Skipping removal of rootless path {}", path.display());
+                        Vec::new()
+                    }
+                }
             }
             _ => {
                 log::warn!("Unhandled VFS event: {:?}", event);
